@@ -1,0 +1,9 @@
+Date,Description,Reference,Credit,Debit,Balance
+01-10-2026,Test 1 Exact,UTR000000001,5000,,10000
+01-10-2026,Test 2 Wrong Amt,UTR000000002,4000,,14000
+01-10-2026,Test 3 Dup,UTR000000003,5000,,19000
+01-10-2026,Test 4 Debit,, ,1000,18000
+InvalidDate,Test 5 Invalid Date,,5000,,23000
+01-10-2026,Test 6 Invalid Amt,,Invalid,,23000
+01-10-2026,Test 8 Unmatched,UTR000000008,5000,,28000
+01-10-2026,Test 9 Multiple No UTR,,7777,,35777

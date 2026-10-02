@@ -1,0 +1,269 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+// ------------------------------------------------------
+// MODELS
+// ------------------------------------------------------
+
+model User {
+  id           String  @id @default(uuid())
+  email        String  @unique
+  name         String
+  passwordHash String  @default("")
+  // Roles: SUPER_ADMIN, ADMIN, VERIFIER, VIEWER
+  role         String  @default("VERIFIER")
+  isActive     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  verifiedDonations    Donation[]            @relation("Verifier")
+  adminNotes           AdminNote[]
+  auditLogs            AuditLog[]
+  verificationAttempts VerificationAttempt[]
+  imports              BankStatementImport[]
+}
+
+// ------------------------------------------------------
+// CORE BUSINESS LOGIC
+// ------------------------------------------------------
+
+model Donation {
+  id         String  @id @default(uuid())
+  donorName  String?
+  donorEmail String?
+  donorPhone String?
+  donorPan   String?
+  donorAddress String?
+  amount     Float
+  currency   String  @default("INR")
+  paymentScreenshotPath String?
+
+  // Statuses: PENDING, VERIFIED, REJECTED, NEEDS_MANUAL_REVIEW, DUPLICATE
+  status String @default("PENDING")
+
+  // Methods: UPI, BANK_TRANSFER, CREDIT_CARD, DEBIT_CARD, PAYU
+  paymentMethod String?
+
+  // Identifying fields for the transaction
+  utr           String?   @unique // Unique for duplicate detection, Nullable for cases where UTR is unavailable
+  receiptNumber String?   @unique
+  donatedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  source            String  @default("DIRECT") // DIRECT, NGO_WEBSITE
+  externalReference String?
+  idempotencyKey    String? @unique
+
+  // Verifier Info
+  verifiedById String?
+  verifiedBy   User?     @relation("Verifier", fields: [verifiedById], references: [id])
+  verifiedAt   DateTime?
+
+  // Relations
+  transactions         PaymentTransaction[]
+  ocrResults           OCRResult[]
+  verificationAttempts VerificationAttempt[]
+  notes                AdminNote[]
+}
+
+// Connects a Donation to actual confirmed payment sources
+model PaymentTransaction {
+  id         String   @id @default(uuid())
+  donationId String
+  donation   Donation @relation(fields: [donationId], references: [id])
+
+  // The normalized data after verification
+  utr             String?   @unique
+  amount          Float
+  transactionDate DateTime?
+  status          String // SUCCESS, FAILED
+
+  // Sources: MANUAL, BANK_STATEMENT, PAYU_WEBHOOK, PAYMENT_PROVIDER
+  source String
+
+  // Strict 1-to-1 Links to specific payment source records
+  bankTransactionId String?          @unique
+  bankTransaction   BankTransaction? @relation(fields: [bankTransactionId], references: [id])
+
+  gatewayTransactionId String?                    @unique
+  gatewayTransaction   PaymentGatewayTransaction? @relation(fields: [gatewayTransactionId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ------------------------------------------------------
+// RAW DATA SOURCES
+// ------------------------------------------------------
+
+// Stores OCR extraction results separately from the verified donation data.
+// OCR is strictly an extraction layer and NEVER a trusted verification source.
+model OCRResult {
+  id         String   @id @default(uuid())
+  donationId String
+  donation   Donation @relation(fields: [donationId], references: [id])
+
+  imageUrl String // Path/URL to the uploaded screenshot
+
+  // Expanded Extraction Fields
+  extractedUtr           String?
+  extractedAmount        Float?
+  extractedDate          DateTime?
+  extractedTime          String?
+  extractedDonorName     String?
+  extractedPaymentMethod String?
+  extractedBankName      String?
+  extractedPaymentStatus String?
+
+  rawText         String?
+  confidenceScore Float?
+  status          String  @default("PENDING") // PENDING, SUCCESS, FAILED, PARTIAL
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model BankStatementImport {
+  id            String   @id @default(uuid())
+  filename      String
+  uploadedById  String
+  uploadedBy    User     @relation(fields: [uploadedById], references: [id])
+  importDate    DateTime @default(now())
+  status        String // PENDING, PROCESSING, COMPLETED, FAILED
+  totalRows     Int      @default(0)
+  processedRows Int      @default(0)
+
+  transactions BankTransaction[]
+
+  createdAt DateTime @default(now())
+}
+
+// Raw transactions imported from bank statement excels/CSVs
+model BankTransaction {
+  id       String              @id @default(uuid())
+  importId String
+  import   BankStatementImport @relation(fields: [importId], references: [id])
+
+  // Expanded fields for multiple NGO bank accounts
+  bankName          String?
+  accountIdentifier String? // Masked (e.g., ****1234)
+
+  date            DateTime
+  transactionTime DateTime?
+  description     String
+  referenceNumber String? // UTR or cheque number extracted from description
+  credit          Float?
+  debit           Float?
+  balance         Float?
+
+  // Reconciliation status against Donations
+  isReconciled Boolean @default(false)
+
+  // Link to the generic payment transaction once reconciled
+  paymentTransaction PaymentTransaction?
+
+  // Prevent duplicate rows if the same bank statement is uploaded twice
+  @@unique([date, description, credit, balance])
+}
+
+// Provider-agnostic payment gateway transaction model (PayU, Razorpay, etc.)
+model PaymentGatewayTransaction {
+  id       String @id @default(uuid())
+  provider String // e.g., "PAYU", "RAZORPAY", "STRIPE"
+
+  // Unique detection across PayU and other providers
+  providerTransactionId String @unique
+
+  status String
+  amount Float
+
+  // Store all provider-specific fields (e.g., PayU's mihpayid, bank_ref_num) as a stringified JSON
+  rawResponse String?
+
+  // Link to the generic payment transaction once synced
+  paymentTransaction PaymentTransaction?
+
+  createdAt DateTime @default(now())
+}
+
+// ------------------------------------------------------
+// AUDITING & TRACKING
+// ------------------------------------------------------
+
+// Tracks every time someone/something tries to verify a donation
+model VerificationAttempt {
+  id         String   @id @default(uuid())
+  donationId String
+  donation   Donation @relation(fields: [donationId], references: [id])
+
+  verifierId String?
+  verifier   User?   @relation(fields: [verifierId], references: [id])
+
+  // Sources: MANUAL, BANK_STATEMENT, PAYU_WEBHOOK, PAYMENT_PROVIDER
+  source       String
+  resultStatus String // Resulting Donation Status
+  notes        String?
+
+  createdAt DateTime @default(now())
+}
+
+model AdminNote {
+  id         String   @id @default(uuid())
+  donationId String
+  donation   Donation @relation(fields: [donationId], references: [id])
+
+  authorId String
+  author   User   @relation(fields: [authorId], references: [id])
+
+  content String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id     String  @id @default(uuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  action     String // e.g., "DONATION_VERIFIED", "BANK_STATEMENT_UPLOADED"
+  entityType String // e.g., "Donation", "BankStatementImport"
+  entityId   String
+
+  // Stored as stringified JSON for SQLite compatibility
+  oldValues String?
+  newValues String?
+
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+}
+
+model Notification {
+  id                          String    @id @default(uuid())
+  type                        String    // NEW_DONATION, OCR_MISMATCH, BANK_TRANSACTION_UNMATCHED, PAYU_PAYMENT_SUCCESS, PAYMENT_AMOUNT_MISMATCH, DUPLICATE_UTR
+  title                       String
+  message                     String
+  priority                    String    // INFO, WARNING, HIGH, CRITICAL
+  recipientRole               String?   // SUPER_ADMIN, ADMIN, VERIFIER (if null, broadcast or specific user)
+  recipientUserId             String?   // Optional: Specific user ID
+  donationId                  String?
+  bankTransactionId           String?
+  paymentGatewayTransactionId String?
+  isRead                      Boolean   @default(false)
+  readAt                      DateTime?
+  createdAt                   DateTime  @default(now())
+
+  idempotencyKey              String?   @unique
+}
